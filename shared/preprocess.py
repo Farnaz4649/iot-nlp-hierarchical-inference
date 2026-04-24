@@ -157,25 +157,27 @@ def tokenize_tfidf(
     vocab_size: int,
     fitted_vectorizer=None,
 ) -> tuple:
-    """Convert a list of text strings to a dense TF-IDF float32 matrix.
+    """Fit or apply a TF-IDF vectorizer and return a sparse matrix.
 
     If fitted_vectorizer is None, a new TfidfVectorizer is fitted on texts
-    and returned alongside the matrix. If a fitted_vectorizer is provided,
-    it is used to transform texts without re-fitting (inference mode).
+    and returned alongside the sparse matrix. If a fitted_vectorizer is
+    provided, it is used to transform texts without re-fitting (inference mode).
 
-    The output matrix is always dense float32, which is the required input
-    dtype for the ONNX classifier exported by export_to_onnx().
+    The matrix is returned sparse so that LogisticRegression can train on it
+    without allocating a large dense array. Convert to dense float32 only at
+    inference time on small batches using to_dense_float32().
 
     Args:
         texts: List of raw utterance strings to vectorize.
         vocab_size: Maximum number of TF-IDF features (vocabulary size).
-            CONFIGURABLE: increase if accuracy is limited by vocabulary size.
+            CONFIGURABLE: set via TFIDF_VOCAB_SIZE in the notebook config cell.
+            5000 is recommended for Tier 1 Colab; increase for Tier 2/3.
         fitted_vectorizer: An already-fitted TfidfVectorizer instance, or
             None to fit a new one on texts.
 
     Returns:
         A tuple (X, vectorizer) where:
-            X:          np.ndarray of shape [n_samples, vocab_size], dtype float32.
+            X:          scipy sparse matrix of shape [n_samples, vocab_size].
             vectorizer: The fitted TfidfVectorizer instance.
     """
     if fitted_vectorizer is None:
@@ -191,7 +193,29 @@ def tokenize_tfidf(
         vectorizer = fitted_vectorizer
         X = vectorizer.transform(texts)
 
-    return X.toarray().astype(np.float32), vectorizer
+    # Keep sparse: LogisticRegression (lbfgs) accepts sparse input natively.
+    # Dense conversion happens only at inference time via to_dense_float32().
+    return X, vectorizer
+
+
+
+def to_dense_float32(X) -> 'np.ndarray':
+    """Convert a sparse TF-IDF matrix to a dense float32 array.
+
+    Called at inference time on small batches before passing to the
+    ONNX session or the joblib classifier's predict_proba. Should NOT
+    be called on the full training set to avoid large memory allocations.
+
+    Args:
+        X: A scipy sparse matrix or a numpy array.
+
+    Returns:
+        A dense np.ndarray of dtype float32 with the same shape as X.
+    """
+    import scipy.sparse
+    if scipy.sparse.issparse(X):
+        return X.toarray().astype(np.float32)
+    return np.asarray(X, dtype=np.float32)
 
 
 def encode_labels(
