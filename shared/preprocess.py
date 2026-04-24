@@ -44,21 +44,28 @@ VALIDATE_FILE_PATTERN = "validate_{intent}.json"
 def _flatten_utterance(utterance: dict) -> str:
     """Join all token text fields in a single SNIPS utterance dict.
 
-    SNIPS stores each utterance as a list of token dicts, where each dict has
-    a 'text' key and an optional 'entity' key. This function concatenates the
-    text fields to produce a plain string.
+    SNIPS stores each utterance as a list of token dicts under the key 'data',
+    where each dict has a 'text' key and an optional 'entity' key. Tokens
+    already include their own surrounding whitespace, so they are concatenated
+    with no added separator and the result is stripped.
 
     Args:
         utterance: A dict of the form {"data": [{"text": "...", ...}, ...]}.
 
     Returns:
-        A single whitespace-normalised string for the utterance.
+        A single stripped string for the utterance.
     """
-    return " ".join(token["text"].strip() for token in utterance["data"]).strip()
+    return "".join(token["text"] for token in utterance.get("data", [])).strip()
 
 
 def _load_split_from_files(data_dir: str, file_pattern: str) -> tuple[list, list]:
     """Load one split (train or validate) from all SNIPS intent files.
+
+    The SNIPS JSON format uses the intent name string as the top-level key,
+    not the word 'data'. Each value is a list of utterance dicts, where each
+    utterance dict contains a 'data' key holding a list of token dicts.
+    Files must be opened with latin-1 encoding as the SNIPS corpus contains
+    Latin-1 encoded characters.
 
     Args:
         data_dir: Path to the directory containing the SNIPS JSON files.
@@ -83,10 +90,12 @@ def _load_split_from_files(data_dir: str, file_pattern: str) -> tuple[list, list
             continue
 
         found_any = True
-        with open(filepath, "r", encoding="utf-8") as f:
+        # latin-1 encoding is required: SNIPS files contain Latin-1 characters
+        with open(filepath, "r", encoding="latin-1") as f:
             raw = json.load(f)
 
-        for utterance in raw["data"]:
+        # Top-level key is the intent name, not 'data'
+        for utterance in raw[intent]:
             texts.append(_flatten_utterance(utterance))
             intents.append(intent)
 
