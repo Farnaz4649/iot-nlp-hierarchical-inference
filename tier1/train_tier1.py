@@ -23,13 +23,14 @@ import os
 import time
 
 import joblib
-from preprocess import to_dense_float32
 import numpy as np
-import onnxruntime as rt
-from skl2onnx import convert_sklearn
-from skl2onnx.common.data_types import FloatTensorType
+from preprocess import to_dense_float32
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, classification_report, f1_score
+
+# onnxruntime and skl2onnx are imported lazily inside export_to_onnx() and
+# load_artefacts_onnx() so that training and evaluation work even if those
+# packages are not yet installed or have a version conflict at import time.
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +135,9 @@ def export_to_onnx(
     n_features: int,
     path: str,
 ) -> None:
+    # Lazy imports: only needed when explicitly exporting to ONNX
+    from skl2onnx import convert_sklearn
+    from skl2onnx.common.data_types import FloatTensorType
     """Export the fitted LogisticRegression classifier to ONNX format.
 
     Only the classifier is exported, not the TfidfVectorizer. The vectorizer
@@ -236,6 +240,7 @@ def load_artefacts_onnx(
     vectorizer_path: str,
     label_encoder_path: str,
 ) -> tuple:
+    import onnxruntime as rt
     """Load the ONNX session and supporting artefacts from disk.
 
     This is the load_fn passed to profile.measure_load_time() for the
@@ -284,7 +289,7 @@ def infer_joblib(
 
 
 def infer_onnx(
-    session: rt.InferenceSession,
+    session,
     X: np.ndarray,
 ) -> dict:
     """Run inference using the ONNX runtime session.
