@@ -23,6 +23,7 @@ import os
 import time
 
 import joblib
+from preprocess import to_dense_float32
 import numpy as np
 import onnxruntime as rt
 from skl2onnx import convert_sklearn
@@ -104,8 +105,10 @@ def evaluate_model(
                          probabilities for each test sample. Used by
                          shared/profile.py and the offloading router.
     """
-    y_pred  = model.predict(X_test)
-    y_proba = model.predict_proba(X_test)
+    # Densify only the test batch; training used sparse matrices throughout
+    X_test_dense = to_dense_float32(X_test)
+    y_pred  = model.predict(X_test_dense)
+    y_proba = model.predict_proba(X_test_dense)
 
     accuracy = accuracy_score(y_test, y_pred)
     f1       = f1_score(y_test, y_pred, average="macro", zero_division=0)
@@ -274,8 +277,9 @@ def infer_joblib(
             'labels': np.ndarray of shape [n_samples,], predicted class indices.
             'proba':  np.ndarray of shape [n_samples, n_classes], class proba.
     """
-    labels = model.predict(X)
-    proba  = model.predict_proba(X).astype(np.float32)
+    X_dense = to_dense_float32(X)
+    labels = model.predict(X_dense)
+    proba  = model.predict_proba(X_dense).astype(np.float32)
     return {"labels": labels, "proba": proba}
 
 
@@ -301,8 +305,9 @@ def infer_onnx(
             'labels': np.ndarray of shape [n_samples,], predicted class indices.
             'proba':  np.ndarray of shape [n_samples, n_classes], class proba.
     """
+    X_dense  = to_dense_float32(X)
     inp_name = session.get_inputs()[0].name
-    outputs  = session.run(None, {inp_name: X})
+    outputs  = session.run(None, {inp_name: X_dense})
 
     labels    = outputs[0]
     raw_proba = outputs[1]  # list of dicts: [{class_idx: prob, ...}, ...]
