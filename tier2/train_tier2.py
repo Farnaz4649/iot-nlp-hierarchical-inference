@@ -500,7 +500,10 @@ def save_hf_model(
         None
     """
     os.makedirs(output_dir, exist_ok=True)
-    model.cpu().save_pretrained(output_dir)
+    # model.cpu().save_pretrained(output_dir) # replace with:
+    import copy
+    cpu_model = copy.deepcopy(model).cpu()
+    cpu_model.save_pretrained(output_dir)
     tokenizer.save_pretrained(output_dir)
 
 
