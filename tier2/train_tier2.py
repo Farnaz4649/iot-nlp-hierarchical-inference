@@ -291,7 +291,7 @@ def build_training_args(
         warmup_ratio=warmup_ratio,
         weight_decay=weight_decay,
         fp16=fp16,
-        evaluation_strategy="epoch",        # evaluate at the end of every epoch
+        eval_strategy="epoch",        # evaluate at the end of every epoch
         save_strategy="epoch",              # must match evaluation_strategy
         load_best_model_at_end=True,        # restore best checkpoint automatically
         metric_for_best_model="f1_macro",   # matches key returned by compute_metrics
