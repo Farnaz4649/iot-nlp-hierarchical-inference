@@ -1,41 +1,30 @@
-# shared/profile.py
-# │
-# ├── measure_latency(inference_fn: callable, inputs,
-# │                   n_runs: int) -> dict
-# │     Runs inference_fn on inputs n_runs times and records wall-clock
-# │     time per run. Returns mean, std, and 95th-percentile latency.
-# │     Returns: {'mean_ms': float, 'std_ms': float, 'p95_ms': float}
-# │
-# ├── measure_peak_ram(inference_fn: callable, inputs) -> float
-# │     Uses memory_profiler to capture peak RAM consumption during a
-# │     single inference call.
-# │     Returns: peak RAM in MB
-# │
-# ├── estimate_energy(latency_ms: float,
-# │                   cpu_tdp_watts: float) -> float
-# │     Estimates energy as latency * TDP. This is a deliberate
-# │     simplification: it assumes the CPU runs at full TDP during
-# │     inference, which gives a conservative upper bound.
-# │     Returns: estimated energy in mJ
-# │
-# └── measure_load_time(load_fn: callable) -> float
-#       Times a single call to load_fn, which should be a zero-argument
-#       callable that loads the model from disk.
-#       Returns: load time in ms
-
 """shared/profiler.py
 
 Hardware-agnostic profiling functions for all three tiers.
-The same four public functions run unchanged across Tier 1 (CPU), Tier 2 (T4),
+The same functions run unchanged across Tier 1 (CPU), Tier 2 (T4),
 and Tier 3 (A100). Only the inference_fn and inputs passed to them differ.
+
+RAM measurement strategy:
+    Two distinct RAM metrics are captured and reported separately:
+
+    1. model_ram_footprint_mb: Total process RSS measured immediately after
+       the model is loaded from disk. This is the meaningful metric for edge
+       deployment: it answers "how much RAM does having this model loaded cost?"
+
+    2. inference_peak_ram_mb: Peak RAM increase during a single inference call,
+       measured using memory_profiler line-by-line sampling. This captures
+       temporary allocations made during the forward pass that the simple
+       before/after delta approach would miss.
+
+    On Linux (including Raspberry Pi), a third cross-check is available via
+    /proc/self/status (VmRSS and VmPeak), which gives kernel-level accounting
+    that is more accurate than psutil on ARM.
 
 Energy estimation note:
     estimate_energy() uses the TDP (thermal design power) of the device as a
     proxy for actual power draw. This gives a conservative upper-bound estimate
     rather than a measured value. On real hardware, a power meter or RAPL
-    interface should be used for accurate readings. The estimate is still
-    useful for cross-tier comparisons when the same methodology is applied
-    consistently.
+    interface should be used for accurate readings.
 
 CSV output:
     save_results_to_csv() writes one row per profiling run to a CSV file under
@@ -46,7 +35,6 @@ CSV output:
 import csv
 import os
 import time
-from functools import wraps
 
 import numpy as np
 import psutil
@@ -67,6 +55,35 @@ def _get_process_ram_mb() -> float:
     """
     process = psutil.Process(os.getpid())
     return process.memory_info().rss / (1024 ** 2)
+
+
+def _read_proc_status_mb() -> dict:
+    """Read VmRSS and VmPeak from /proc/self/status for kernel-level RAM accounting.
+
+    Available on Linux only (including Raspberry Pi). More accurate than psutil
+    on ARM because it reads directly from the kernel's memory accounting tables
+    without any psutil abstraction layer.
+
+    Args:
+        None
+
+    Returns:
+        A dict with keys:
+            'vm_rss_mb':  float, current resident set size in MB.
+            'vm_peak_mb': float, peak virtual memory size in MB.
+        Returns zeros on non-Linux platforms.
+    """
+    result = {'vm_rss_mb': 0.0, 'vm_peak_mb': 0.0}
+    try:
+        with open('/proc/self/status', 'r') as f:
+            for line in f:
+                if line.startswith('VmRSS:'):
+                    result['vm_rss_mb'] = int(line.split()[1]) / 1024.0
+                elif line.startswith('VmPeak:'):
+                    result['vm_peak_mb'] = int(line.split()[1]) / 1024.0
+    except (FileNotFoundError, PermissionError):
+        pass
+    return result
 
 
 def _time_single_call(inference_fn: callable, inputs) -> float:
@@ -135,35 +152,81 @@ def measure_latency(
     }
 
 
-def measure_peak_ram(
+def measure_model_ram_footprint(load_fn: callable) -> dict:
+    """Measure the total RAM footprint of a loaded model.
+
+    Captures process RSS immediately before and after calling load_fn.
+    The difference is the true memory cost of having the model resident
+    in RAM, which is the meaningful metric for edge deployment sizing.
+
+    On Linux, also reads /proc/self/status for a kernel-level cross-check.
+
+    Args:
+        load_fn: A zero-argument callable that loads the model from disk
+            and returns the loaded artefacts. Same callable used in
+            measure_load_time().
+
+    Returns:
+        A dict with keys:
+            'footprint_mb':  float, RSS increase after loading in MB.
+            'rss_after_mb':  float, total process RSS after loading in MB.
+            'vm_rss_mb':     float, kernel VmRSS after loading (Linux only).
+            'vm_peak_mb':    float, kernel VmPeak after loading (Linux only).
+    """
+    ram_before_mb = _get_process_ram_mb()
+    load_fn()
+    ram_after_mb  = _get_process_ram_mb()
+    proc_status   = _read_proc_status_mb()
+
+    return {
+        'footprint_mb': float(max(ram_after_mb - ram_before_mb, 0.0)),
+        'rss_after_mb': float(ram_after_mb),
+        'vm_rss_mb':    proc_status['vm_rss_mb'],
+        'vm_peak_mb':   proc_status['vm_peak_mb'],
+    }
+
+
+def measure_inference_peak_ram(
     inference_fn: callable,
     inputs,
 ) -> float:
-    """Measure peak RSS RAM consumed during a single inference call.
+    """Measure peak RAM consumed during inference using memory_profiler sampling.
 
-    Samples process RSS memory before and after the call, then reports
-    the delta. This approach captures the allocation caused by inference
-    without requiring the memory_profiler decorator, which can interfere
-    with some GPU runtimes.
+    Uses memory_profiler.memory_usage() to sample process RSS at 1ms intervals
+    during the inference call. This captures temporary allocation spikes inside
+    the forward pass that the simple before/after delta approach misses entirely.
 
-    Note: RSS measures physical memory pages held by the process. It
-    does not include GPU VRAM. For GPU tiers, measure VRAM separately
-    using torch.cuda.max_memory_allocated().
+    Falls back to the before/after delta approach if memory_profiler is not
+    available, with a warning printed to stdout.
+
+    Note: Does not measure GPU VRAM. Use measure_peak_vram_mb() for that.
 
     Args:
         inference_fn: A callable that accepts inputs and performs inference.
         inputs: The input to pass to inference_fn.
 
     Returns:
-        Peak RAM increase in MB as a float. Returns 0.0 if memory usage
-        decreased during the call (can occur due to GC).
+        Peak RAM increase above baseline during the inference call, in MB.
+        Returns 0.0 if the peak could not be measured.
     """
-    ram_before_mb = _get_process_ram_mb()
-    inference_fn(inputs)
-    ram_after_mb  = _get_process_ram_mb()
-
-    delta_mb = ram_after_mb - ram_before_mb
-    return float(max(delta_mb, 0.0))
+    try:
+        from memory_profiler import memory_usage
+        baseline_mb = _get_process_ram_mb()
+        mem_samples = memory_usage(
+            (inference_fn, (inputs,), {}),
+            interval=0.001,   # sample every 1ms
+            include_children=True,
+            multiprocess=False,
+        )
+        peak_mb = max(mem_samples) if mem_samples else baseline_mb
+        return float(max(peak_mb - baseline_mb, 0.0))
+    except ImportError:
+        print("[profiler] Warning: memory_profiler not available. "
+              "Falling back to before/after RSS delta.")
+        ram_before = _get_process_ram_mb()
+        inference_fn(inputs)
+        ram_after  = _get_process_ram_mb()
+        return float(max(ram_after - ram_before, 0.0))
 
 
 def measure_peak_vram_mb() -> float:
@@ -247,18 +310,22 @@ def measure_load_time(load_fn: callable) -> float:
 RESULTS_CSV_COLUMNS = [
     "tier",
     "model_name",
-    "inference_mode",    # 'joblib', 'onnx', 'hf_pytorch', 'onnx_gpu', 'llm_hf'
+    "inference_mode",       # 'joblib', 'onnx', 'hf_pytorch', 'onnx_gpu', 'llm_hf'
     "n_samples",
     "mean_latency_ms",
     "std_latency_ms",
     "p95_latency_ms",
-    "peak_ram_mb",
-    "peak_vram_mb",
+    "model_footprint_mb",   # RSS increase after model load: true memory cost
+    "inference_peak_ram_mb",# peak RAM spike during inference (memory_profiler)
+    "rss_after_load_mb",    # total process RSS after model load
+    "vm_rss_mb",            # kernel VmRSS (Linux only, 0 elsewhere)
+    "vm_peak_mb",           # kernel VmPeak (Linux only, 0 elsewhere)
+    "peak_vram_mb",         # GPU VRAM peak (Tier 2/3 only)
     "energy_mj",
     "load_time_ms",
     "accuracy",
     "f1_macro",
-    "notes",             # CONFIGURABLE: free-text field for run notes
+    "notes",                # CONFIGURABLE: free-text field for run notes
 ]
 
 
@@ -339,37 +406,48 @@ def run_full_profile(
     print(f"[profile] Starting full profile: Tier {tier} | {model_name} | {inference_mode}")
 
     latency_stats = measure_latency(inference_fn, inputs, n_runs)
-    print(f"[profile] Latency: mean={latency_stats['mean_ms']:.2f}ms  "
+    print(f"[profile] Latency      : mean={latency_stats['mean_ms']:.2f}ms  "
           f"std={latency_stats['std_ms']:.2f}ms  "
           f"p95={latency_stats['p95_ms']:.2f}ms")
 
-    peak_ram = measure_peak_ram(inference_fn, inputs)
-    print(f"[profile] Peak RAM delta: {peak_ram:.2f} MB")
+    ram_footprint = measure_model_ram_footprint(load_fn)
+    print(f"[profile] Model RAM footprint : {ram_footprint['footprint_mb']:.2f} MB "
+          f"(total RSS after load: {ram_footprint['rss_after_mb']:.2f} MB)")
+    if ram_footprint['vm_rss_mb'] > 0:
+        print(f"[profile] Kernel VmRSS        : {ram_footprint['vm_rss_mb']:.2f} MB  "
+              f"VmPeak: {ram_footprint['vm_peak_mb']:.2f} MB")
+
+    inference_peak = measure_inference_peak_ram(inference_fn, inputs)
+    print(f"[profile] Inference peak RAM  : {inference_peak:.2f} MB")
 
     peak_vram = measure_peak_vram_mb()
-    print(f"[profile] Peak VRAM: {peak_vram:.2f} MB")
+    print(f"[profile] Peak VRAM           : {peak_vram:.2f} MB")
 
     energy = estimate_energy(latency_stats["mean_ms"], tdp_watts)
-    print(f"[profile] Energy estimate: {energy:.4f} mJ")
+    print(f"[profile] Energy estimate     : {energy:.4f} mJ")
 
     load_time = measure_load_time(load_fn)
-    print(f"[profile] Load time: {load_time:.2f} ms")
+    print(f"[profile] Load time           : {load_time:.2f} ms")
 
     results = {
-        "tier":             tier,
-        "model_name":       model_name,
-        "inference_mode":   inference_mode,
-        "n_samples":        n_samples,
-        "mean_latency_ms":  round(latency_stats["mean_ms"], 4),
-        "std_latency_ms":   round(latency_stats["std_ms"],  4),
-        "p95_latency_ms":   round(latency_stats["p95_ms"],  4),
-        "peak_ram_mb":      round(peak_ram,   4),
-        "peak_vram_mb":     round(peak_vram,  4),
-        "energy_mj":        round(energy,     6),
-        "load_time_ms":     round(load_time,  4),
-        "accuracy":         round(accuracy,   6),
-        "f1_macro":         round(f1_macro,   6),
-        "notes":            notes,
+        "tier":                   tier,
+        "model_name":             model_name,
+        "inference_mode":         inference_mode,
+        "n_samples":              n_samples,
+        "mean_latency_ms":        round(latency_stats["mean_ms"], 4),
+        "std_latency_ms":         round(latency_stats["std_ms"],  4),
+        "p95_latency_ms":         round(latency_stats["p95_ms"],  4),
+        "model_footprint_mb":     round(ram_footprint["footprint_mb"],  4),
+        "inference_peak_ram_mb":  round(inference_peak,                 4),
+        "rss_after_load_mb":      round(ram_footprint["rss_after_mb"],  4),
+        "vm_rss_mb":              round(ram_footprint["vm_rss_mb"],     4),
+        "vm_peak_mb":             round(ram_footprint["vm_peak_mb"],    4),
+        "peak_vram_mb":           round(peak_vram,                      4),
+        "energy_mj":              round(energy,                         6),
+        "load_time_ms":           round(load_time,                      4),
+        "accuracy":               round(accuracy,                       6),
+        "f1_macro":               round(f1_macro,                       6),
+        "notes":                  notes,
     }
 
     save_results_to_csv(results, results_csv_path)
