@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from pipeline.router import route_sample, serialize_sample
+from router import route_sample, serialize_sample
 
 
 def run_pipeline(test_samples: list[str],
@@ -198,26 +198,15 @@ def run_ablation(test_samples: list[str],
             tier_used = 3
         
         elif mode == 'two_tier':
-            # Use Tiers 1 and 2 only. Tier 1 always runs, but Tier 2 result
-            # is returned regardless of confidence (no further escalation).
+            # Use Tiers 1 and 2 only. Tier 1 always runs first. If confidence
+            # is below a fixed threshold (0.7), escalate to Tier 2 and return
+            # Tier 2's result regardless of its confidence (no further escalation).
+            # CONFIGURABLE: 0.7 is the default two-tier escalation threshold.
+            TWO_TIER_THETA = 0.7
             output_tier1 = tier1_fn(sample)
             confidence_tier1 = float(np.max(output_tier1['proba']))
             
-            # For two-tier, we use a fixed escalation threshold of 0.0,
-            # meaning every sample that fails Tier 1 goes to Tier 2.
-            # Alternatively, escalate always (use a very high theta).
-            # We choose: escalate if confidence < 1.0 (i.e., always go to Tier 2
-            # if Tier 1 is uncertain), but more practically, use a low threshold
-            # like 0.5 as a default. For phase 2, we escalate always.
-            # Actually, for a true "two-tier" ablation, we should escalate
-            # Tier 1 to Tier 2 generously (low threshold). Let's use theta1=1.0
-            # which means "escalate unless confidence is exactly 1.0".
-            # Better: use a high threshold. Actually, let's escalate Tier 1
-            # to Tier 2 based on a reasonable default threshold (e.g., 0.7),
-            # and Tier 2 always returns (theta2 = 0.0, meaning never escalate
-            # beyond Tier 2).
-            
-            if confidence_tier1 < 0.7:  # Escalate to Tier 2 if low confidence
+            if confidence_tier1 < TWO_TIER_THETA:
                 output_tier2 = tier2_fn(sample)
                 prediction = int(output_tier2['labels'])
                 confidence = float(np.max(output_tier2['proba']))
