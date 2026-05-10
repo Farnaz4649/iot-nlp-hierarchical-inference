@@ -1,0 +1,2 @@
+tier,model_name,inference_mode,n_samples,mean_latency_ms,std_latency_ms,p95_latency_ms,peak_ram_mb,peak_vram_mb,rss_after_load_mb,vm_rss_mb,vm_peak_mb,peak_vram_mb,energy_mj,load_time_ms,accuracy,f1_macro,notes
+1,LogisticRegression+TF-IDF,onnx,700,12.2102,0.1371,12.5593,0,236.5781,328.6094,328.6094,2104.0156,0,146.522063,32.9987,0.983315,0.983262,Tier 1 real hardware Raspberry Pi 5

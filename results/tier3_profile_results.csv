@@ -1,0 +1,3 @@
+tier,model_name,inference_mode,n_samples,mean_latency_ms,std_latency_ms,p95_latency_ms,model_footprint_mb,inference_peak_ram_mb,rss_after_load_mb,vm_rss_mb,vm_peak_mb,peak_vram_mb,energy_mj,load_time_ms,accuracy,f1_macro,notes
+3,meta-llama/Llama-3.2-3B-Instruct,llm_zero_shot,700,131.2187,2.0535,134.8702,223.3438,2205.7188,2640.0039,2640.0039,37190.3906,12264.2949,39365.603892,4166.3707,0.905714,0.910294,A100 bfloat16; max_new_tokens=20
+3,meta-llama/Llama-3.2-3B-Instruct,llm_few_shot_k3,700,136.95,3.7171,145.1829,7.7617,2215.7852,2649.6133,2649.6133,37335.0703,12264.2949,41085.009996,4199.716,0.96,0.960671,A100 bfloat16; max_new_tokens=20

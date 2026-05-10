@@ -1,0 +1,3 @@
+tier,model_name,inference_mode,n_samples,mean_latency_ms,std_latency_ms,p95_latency_ms,model_footprint_mb,inference_peak_ram_mb,rss_after_load_mb,vm_rss_mb,vm_peak_mb,peak_vram_mb,energy_mj,load_time_ms,accuracy,f1_macro,notes
+2,distilbert/distilbert-base-uncased,hf_pytorch,1,6.2704,0.7887,6.9875,0.0,2198.1055,3070.4414,3070.4414,19385.6719,1314.3579,438.927781,424.8396,0.99,0.989991,T4 GPU Colab emulation | fp16=True | seq_len=64
+2,distilbert/distilbert-base-uncased,onnx_gpu,1,11.4737,3.9864,19.2635,0.0039,2198.0898,3071.8906,3071.8906,19404.7852,1057.8438,803.156181,2205.2742,0.99,0.989991,T4 GPU ONNX | CUDAExecutionProvider | seq_len=64
